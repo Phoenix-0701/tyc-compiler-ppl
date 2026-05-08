@@ -7,13 +7,12 @@ into Abstract Syntax Trees using the visitor pattern.
 from build.TyCVisitor import TyCVisitor
 from build.TyCParser import TyCParser
 from src.utils.nodes import *
-
+from antlr4.tree.Tree import TerminalNode
 
 class ASTGeneration(TyCVisitor):
     """AST Generation visitor for TyC language."""
 
     def flatten(self, lst):
-        """Helper to flatten nested lists of AST nodes."""
         res = []
         for item in lst:
             if isinstance(item, list):
@@ -25,9 +24,7 @@ class ASTGeneration(TyCVisitor):
     # =========================================================
     # Program & Declarations
     # =========================================================
-
     def visitProgram(self, ctx: TyCParser.ProgramContext):
-        # Làm phẳng toàn bộ các khai báo ở mức unit
         decls = self.flatten(self.visit(ctx.unit()))
         return Program(decls)
 
@@ -62,7 +59,6 @@ class ASTGeneration(TyCVisitor):
     # =========================================================
     # Types
     # =========================================================
-
     def visitReturnType(self, ctx: TyCParser.ReturnTypeContext):
         if ctx.VOID():
             return VoidType()
@@ -71,18 +67,14 @@ class ASTGeneration(TyCVisitor):
         return self.visit(ctx.typeSpec())
 
     def visitTypeSpec(self, ctx: TyCParser.TypeSpecContext):
-        if ctx.INT():
-            return IntType()
-        if ctx.FLOAT():
-            return FloatType()
-        if ctx.STRING():
-            return StringType()
+        if ctx.INT(): return IntType()
+        if ctx.FLOAT(): return FloatType()
+        if ctx.STRING(): return StringType()
         return StructType(ctx.ID().getText())
 
     # =========================================================
     # Statements
     # =========================================================
-
     def visitBlockStmt(self, ctx: TyCParser.BlockStmtContext):
         stmts = self.flatten([self.visit(s) for s in ctx.stmt()])
         return BlockStmt(stmts)
@@ -112,29 +104,26 @@ class ASTGeneration(TyCVisitor):
     def visitForStmt(self, ctx: TyCParser.ForStmtContext):
         init = None
         if ctx.varDecl():
-            decls = self.visit(ctx.varDecl())
-            init = decls[0] if len(decls) == 1 else BlockStmt(decls)
+            # AST Node ForStmt chỉ chấp nhận 1 VarDecl duy nhất cho init
+            init = self.visit(ctx.varDecl())[0] 
         elif ctx.exprStmt():
             init = self.visit(ctx.exprStmt())
 
         cond = None
         update = None
-        expr_nodes = ctx.expr()
         
-        if len(expr_nodes) == 2:
-            cond = self.visit(expr_nodes[0])
-            update = self.visit(expr_nodes[1])
-        elif len(expr_nodes) == 1:
-            semi_count = 0
-            is_cond = False
-            for child in ctx.getChildren():
-                if child.getText() == ';':
-                    semi_count += 1
-                if child == expr_nodes[0] and semi_count < 2:
-                    is_cond = True
-            
-            if is_cond: cond = self.visit(expr_nodes[0])
-            else: update = self.visit(expr_nodes[0])
+        # State machine để bắt chính xác điều kiện và bước nhảy
+        state = 0 
+        for child in ctx.getChildren():
+            if child == ctx.varDecl() or child == ctx.exprStmt():
+                state = 1
+            elif isinstance(child, TerminalNode) and child.getText() == ';':
+                state += 1
+            elif isinstance(child, TyCParser.ExprContext):
+                if state == 1:
+                    cond = self.visit(child)
+                elif state == 2:
+                    update = self.visit(child)
 
         body = self.visit(ctx.stmt())
         return ForStmt(init, cond, update, body)
@@ -171,7 +160,6 @@ class ASTGeneration(TyCVisitor):
     # =========================================================
     # Expressions
     # =========================================================
-
     def visitParenExpr(self, ctx: TyCParser.ParenExprContext):
         return self.visit(ctx.expr())
 
@@ -181,11 +169,8 @@ class ASTGeneration(TyCVisitor):
     def visitCallExpr(self, ctx: TyCParser.CallExprContext):
         func = self.visit(ctx.expr())
         args = self.visit(ctx.argList()) if ctx.argList() else []
-        # FuncCall yêu cầu name là string
+        # Hàm trong TyC luôn là toàn cục, Node FuncCall bắt buộc name là chuỗi
         func_name = func.name if isinstance(func, Identifier) else str(func)
-        # Nếu func là MemberAccess (như f(1).g(2)), ta phải xử lý đặc biệt
-        if isinstance(func, MemberAccess):
-             return FuncCall(func, args)
         return FuncCall(func_name, args)
 
     def visitMemberExpr(self, ctx: TyCParser.MemberExprContext):

@@ -1,37 +1,19 @@
 """
 Static Semantic Checker for TyC Programming Language
-
-This module implements a comprehensive static semantic checker using visitor pattern
-for the TyC procedural programming language. It performs type checking,
-scope management, type inference, and detects all semantic errors as
-specified in the TyC language specification.
 """
 
 from functools import reduce
-from typing import (
-    Dict,
-    List,
-    Set,
-    Optional,
-    Any,
-    Tuple,
-    NamedTuple,
-    Union,
-    TYPE_CHECKING,
-)
+from typing import Dict, List, Set, Optional, Any, Tuple, Union, TYPE_CHECKING
 from ..utils.visitor import ASTVisitor
 from ..utils.nodes import *
-
-# Type aliases for better type hints
-TyCType = Union[IntType, FloatType, StringType, VoidType, StructType]
 from .static_error import *
 
+TyCType = Union[IntType, FloatType, StringType, VoidType, StructType]
 
 class SymbolTable:
     def __init__(self):
-        # Stack các dictionary. Mỗi dict đại diện cho một scope.
-        # Key: tên biến, Value: Kiểu dữ liệu (hoặc None nếu là auto chưa suy luận)
         self.scopes: List[Dict[str, Optional[Type]]] = [{}]
+        self.current_func_params: Set[str] = set()
 
     def enter_scope(self):
         self.scopes.append({})
@@ -40,13 +22,14 @@ class SymbolTable:
         self.scopes.pop()
 
     def declare(self, name: str, var_type: Optional[Type], kind: str):
-        # kind có thể là "Variable" hoặc "Parameter"
         if name in self.scopes[-1]:
             raise Redeclared(kind, name)
+        if kind == "Variable" and name in self.current_func_params:
+            raise Redeclared("Variable", name)
+            
         self.scopes[-1][name] = var_type
 
     def lookup(self, name: str) -> Optional[Type]:
-        # Tìm từ scope trong cùng ra ngoài
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
@@ -63,12 +46,9 @@ class SymbolTable:
 class StaticChecker(ASTVisitor):
     def __init__(self):
         self.sym_table = SymbolTable()
-        # Lưu trữ Struct: name -> dict các fields (name -> type)
         self.structs: Dict[str, Dict[str, Type]] = {}
-        # Lưu trữ Hàm: name -> (return_type, [param_types])
         self.functions: Dict[str, Tuple[Optional[Type], List[Type]]] = {}
         
-        # Biến trạng thái ngữ cảnh
         self.loop_depth = 0
         self.switch_depth = 0
         self.current_func_name = ""
@@ -76,6 +56,9 @@ class StaticChecker(ASTVisitor):
         
         self._init_builtins()
 
+    def check_program(self, ast):
+        return ast.accept(self, None)
+    
     def _init_builtins(self):
         self.functions['readInt'] = (IntType(), [])
         self.functions['readFloat'] = (FloatType(), [])
@@ -85,7 +68,6 @@ class StaticChecker(ASTVisitor):
         self.functions['printString'] = (VoidType(), [StringType()])
 
     def is_same_type(self, type1: Type, type2: Type) -> bool:
-        """Hỗ trợ so sánh Type chặt chẽ."""
         if type(type1) != type(type2):
             return False
         if isinstance(type1, StructType) and isinstance(type2, StructType):
@@ -95,11 +77,10 @@ class StaticChecker(ASTVisitor):
     # =========================================================================
     # Program & Declarations
     # =========================================================================
-
     def visit_program(self, node: Program, o: Any = None):
         for decl in node.decls:
             decl.accept(self, o)
-        
+
 
     def visit_struct_decl(self, node: StructDecl, o: Any = None):
         if node.name in self.structs:
@@ -110,7 +91,6 @@ class StaticChecker(ASTVisitor):
             if member.name in members:
                 raise Redeclared("Member", member.name)
             
-            # Kiểm tra kiểu của member
             if isinstance(member.member_type, StructType):
                 if member.member_type.struct_name not in self.structs:
                     raise UndeclaredStruct(member.member_type.struct_name)
@@ -120,7 +100,7 @@ class StaticChecker(ASTVisitor):
         self.structs[node.name] = members
 
     def visit_member_decl(self, node: MemberDecl, o: Any = None):
-        pass # Đã xử lý gộp bên trong visit_struct_decl
+        pass
 
     def visit_func_decl(self, node: FuncDecl, o: Any = None):
         if node.name in self.functions:
@@ -134,31 +114,29 @@ class StaticChecker(ASTVisitor):
             
         self.functions[node.name] = (node.return_type, param_types)
         
-        # Setup ngữ cảnh hàm
         self.current_func_name = node.name
         self.current_func_return = node.return_type
         
         self.sym_table = SymbolTable()
-        self.sym_table.enter_scope()
+        self.sym_table.current_func_params = {p.name for p in node.params}
+        self.sym_table.enter_scope() 
         
         for param in node.params:
             self.sym_table.declare(param.name, param.param_type, "Parameter")
             
-        # Thân hàm
-        for stmt in node.body.statements:
-            stmt.accept(self, o)
-            
+        node.body.accept(self, o)
+        
         self.sym_table.exit_scope()
         self.current_func_return = None
         self.current_func_name = ""
 
     def visit_param(self, node: Param, o: Any = None):
-        pass # Xử lý gộp trong func_decl
+        pass
 
     def visit_var_decl(self, node: VarDecl, o: Any = None):
         init_type = node.init_value.accept(self, node.var_type) if node.init_value else None
         
-        if node.var_type is None: # auto
+        if node.var_type is None:
             if init_type is None:
                 self.sym_table.declare(node.name, None, "Variable")
             else:
@@ -176,13 +154,11 @@ class StaticChecker(ASTVisitor):
     # =========================================================================
     # Statements
     # =========================================================================
-
     def visit_block_stmt(self, node: BlockStmt, o: Any = None):
         self.sym_table.enter_scope()
         for stmt in node.statements:
             stmt.accept(self, o)
             
-        # Bắt lỗi không suy luận được biến auto khi kết thúc block
         for name, var_type in self.sym_table.scopes[-1].items():
             if var_type is None:
                 raise TypeCannotBeInferred(node)
@@ -193,7 +169,7 @@ class StaticChecker(ASTVisitor):
         cond_type = node.condition.accept(self, o)
         if cond_type is None:
             raise TypeCannotBeInferred(node)
-        if not isinstance(cond_type, IntType): # Giả định boolean = int
+        if not isinstance(cond_type, IntType):
             raise TypeMismatchInStatement(node)
             
         node.then_stmt.accept(self, o)
@@ -274,19 +250,17 @@ class StaticChecker(ASTVisitor):
             raise MustInLoop(node)
 
     def visit_return_stmt(self, node: ReturnStmt, o: Any = None):
-        ret_type = node.expr.accept(self, o) if node.expr else VoidType()
+        ret_type = node.expr.accept(self, self.current_func_return) if node.expr else VoidType()
 
         if ret_type is None:
             raise TypeCannotBeInferred(node)
         
-        # Suy luận kiểu trả về của hàm (nếu auto)
         if self.current_func_return is None:
             self.current_func_return = ret_type
             params = self.functions[self.current_func_name][1]
             self.functions[self.current_func_name] = (ret_type, params)
         else:
             if not self.is_same_type(self.current_func_return, ret_type):
-                # Void -> Void, Int -> Float (tùy spec môn học, mặc định strict)
                 raise TypeMismatchInStatement(node)
 
     def visit_expr_stmt(self, node: ExprStmt, o: Any = None):
@@ -295,18 +269,20 @@ class StaticChecker(ASTVisitor):
     # =========================================================================
     # Expressions
     # =========================================================================
-
     def visit_binary_op(self, node: BinaryOp, o: Any = None):
-        left_type = node.left.accept(self, o)
-        right_type = node.right.accept(self, o)
+        # KHÔNG TRUYỀN `o` XUỐNG DƯỚI NỮA!
+        left_type = node.left.accept(self, None)
+        right_type = node.right.accept(self, None)
         
-        # Suy luận kiểu chéo
-        if left_type is None and isinstance(right_type, (IntType, FloatType)):
-            left_type = right_type
-            node.left.accept(self, left_type)
-        if right_type is None and isinstance(left_type, (IntType, FloatType)):
-            right_type = left_type
-            node.right.accept(self, right_type)
+        if left_type is None and isinstance(node.right, IntLiteral):
+            left_type = IntType()
+            if isinstance(node.left, Identifier):
+                self.sym_table.update_type(node.left.name, left_type)
+                
+        if right_type is None and isinstance(node.left, IntLiteral):
+            right_type = IntType()
+            if isinstance(node.right, Identifier):
+                self.sym_table.update_type(node.right.name, right_type)
 
         if left_type is None or right_type is None:
              raise TypeCannotBeInferred(node)
@@ -334,11 +310,11 @@ class StaticChecker(ASTVisitor):
                 raise TypeMismatchInExpression(node)
             return IntType()
             
-        elif op == '[]': # Mảng không được support chính thức trong TyC AST, nhưng nếu có
+        elif op == '[]':
             raise TypeMismatchInExpression(node)
-
+    
     def visit_prefix_op(self, node: PrefixOp, o: Any = None):
-        op_type = node.operand.accept(self, o)
+        op_type = node.operand.accept(self, None) # Không truyền o
         if op_type is None:
             raise TypeCannotBeInferred(node)
 
@@ -360,7 +336,7 @@ class StaticChecker(ASTVisitor):
             return op_type
 
     def visit_postfix_op(self, node: PostfixOp, o: Any = None):
-        op_type = node.operand.accept(self, o)
+        op_type = node.operand.accept(self, None) # Không truyền o
         if op_type is None:
             raise TypeCannotBeInferred(node)
 
@@ -382,6 +358,11 @@ class StaticChecker(ASTVisitor):
             if isinstance(node.lhs, Identifier):
                 self.sym_table.update_type(node.lhs.name, rhs_type)
                 lhs_type = rhs_type
+                
+        if rhs_type is None and lhs_type is not None:
+            if isinstance(node.rhs, Identifier):
+                self.sym_table.update_type(node.rhs.name, lhs_type)
+                rhs_type = lhs_type
         
         if lhs_type is None or rhs_type is None:
             raise TypeCannotBeInferred(node)
@@ -409,6 +390,10 @@ class StaticChecker(ASTVisitor):
         return struct_members[node.member]
 
     def visit_func_call(self, node: FuncCall, o: Any = None):
+        # TyC không hỗ trợ gọi function pointers / method (Ví dụ: f(1).g())
+        if not isinstance(node.name, str):
+            raise TypeMismatchInExpression(node)
+            
         if node.name not in self.functions:
             raise UndeclaredFunction(node.name)
 
@@ -469,15 +454,9 @@ class StaticChecker(ASTVisitor):
     # =========================================================================
     # Literals & Types Base Methods
     # =========================================================================
-
-    def visit_int_literal(self, node: IntLiteral, o: Any = None):
-        return IntType()
-
-    def visit_float_literal(self, node: FloatLiteral, o: Any = None):
-        return FloatType()
-
-    def visit_string_literal(self, node: StringLiteral, o: Any = None):
-        return StringType()
+    def visit_int_literal(self, node: IntLiteral, o: Any = None): return IntType()
+    def visit_float_literal(self, node: FloatLiteral, o: Any = None): return FloatType()
+    def visit_string_literal(self, node: StringLiteral, o: Any = None): return StringType()
 
     def visit_int_type(self, node: IntType, o: Any = None): return node
     def visit_float_type(self, node: FloatType, o: Any = None): return node
